@@ -1,8 +1,10 @@
 /** Simple C terminal user interface
  *
+ * Put 'SCTUI_IMPL' to one source file to compile it and use it.
+ *
  * MIT License
  *
- * Copyright (c) 2025 at2er <xb0515@outlook.com>
+ * Copyright (c) 2026 at2er <xb0515@outlook.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
