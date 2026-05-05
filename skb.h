@@ -94,11 +94,10 @@ struct key {
 	SKB_REDEFINE_KEY
 };
 
-extern bool skb_handle_key(void);
+extern bool skb_handle_key(int key);
 
-extern int  key_buf[SCTUI_KEYBUF_SIZ];
-extern char key_combo[SKB_MAX_KEYCOMBO];
-extern int  key_combo_count;
+extern int skb_combo[SKB_MAX_KEYCOMBO];
+extern int skb_ncombo;
 
 #endif /* SKB_H */
 
@@ -106,35 +105,31 @@ extern int  key_combo_count;
 #include <ctype.h>
 #include <string.h>
 
-int  key_buf[SCTUI_KEYBUF_SIZ];
-char key_combo[SKB_MAX_KEYCOMBO];
-int  key_combo_count;
+int skb_combo[SKB_MAX_KEYCOMBO];
+int skb_ncombo;
 
 static int
 _skb_compare_key(const char *key, int pressed)
 {
-#define SLASH_KEY(K, C) \
+#define SPECIAL(K, P, C) \
 	if (pressed == (K)) { \
-		if (key[0] == '/' && key[1] == (C)) \
+		if (key[0] == (P) && key[1] == (C)) \
 			return 2; \
 		return 0; \
 	}
-#define SPECIAL_CHR(C) (pressed == (C) && key[0] == (C) && key[1] == (C))
-	SLASH_KEY(KBS,  'b') else
-	SLASH_KEY(KCR,  'r') else
-	SLASH_KEY(KESC, 'e')
-	else if (iscntrl(pressed)) {
+	SPECIAL(127, '/', 'b') else
+	SPECIAL(13,  '/', 'r') else
+	SPECIAL(27,  '/', 'e') else
+	SPECIAL(' ', '/', 's') else
+	SPECIAL('/', '/', '/') else
+	SPECIAL('^', '^', '^') else
+	if (iscntrl(pressed)) {
 		if (key[0] != '^')
 			return 0;
-		if (KCTRL(key[1]) == KCTRL(pressed))
+		if (TK_CTRL(key[1]) == TK_CTRL(pressed))
 			return 2;
-	} else if (SPECIAL_CHR('/')) {
-		return 2;
-	} else if (SPECIAL_CHR('^')) {
-		return 2;
 	}
-#undef SLASH_KEY
-#undef SPECIAL_CHR
+#undef SPECIAL
 	if (pressed != key[0])
 		return 0;
 	return 1;
@@ -144,37 +139,37 @@ static enum _SKB_APPLY_KEY_RESULT
 _skb_apply_key(const struct key *key)
 {
 	int r;
-	for (int i = 0, ki = 0; i < key_combo_count; i++) {
-		r = _skb_compare_key(&key->keys[ki], key_combo[i]);
+	for (int i = 0, ki = 0; i < skb_ncombo; i++) {
+		r = _skb_compare_key(&key->keys[ki], skb_combo[i]);
 		if (r < 1)
 			break;
 		ki += r;
-		if (i != key_combo_count - 1)
+		if (i != skb_ncombo - 1)
 			continue;
 		if (key->keys[ki] != '\0')
 			return _SKB_APPLY_KEY_USABLE_KEY;
 		key->func(&key->arg);
-		key_combo_count = 0;
+		skb_ncombo = 0;
 		return _SKB_APPLY_KEY_SUCCESS;
 	}
 	return _SKB_APPLY_KEY_NOT_FOUND;
 }
 
 bool
-skb_handle_key(void)
+skb_handle_key(int key)
 {
 	const struct key *keys;
 	enum _SKB_APPLY_KEY_RESULT ret;
-	bool usable_key = false;
-	key_combo[key_combo_count++] = key_buf[0];
+	bool usable = false;
+	skb_combo[skb_ncombo++] = key;
 	keys = get_keys_table();
 	for (int i = 0; keys[i].keys != NULL; i++) {
 		ret = _skb_apply_key(&keys[i]);
 		if (ret == _SKB_APPLY_KEY_SUCCESS)
 			return true;
 		if (ret == _SKB_APPLY_KEY_USABLE_KEY)
-			usable_key = true;
+			usable = true;
 	}
-	return usable_key;
+	return usable;
 }
 #endif /* SKB_IMPL */

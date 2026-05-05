@@ -38,61 +38,77 @@
 #include <stdint.h>
 #include <termios.h>
 
-#define KBS 127  /* 127 backspace    (But it is DEL in 'man ascii') */
-#define KCR '\r' /* 13  carriage ret */
-#define KESC 27  /* 27  escape       */
+#define TK_CTRL(K) ((K) & 0x1f)
+#define SCTUI_OUT_BUF_SIZ 8192
 
-#define KCTRL(K) ((K) & 0x1f)
-#define SCTUI_KEYBUF_SIZ 3
+/* see 'man 4 console_codes'
+ *
+ *               22  4  4
+ * |b b b b b b|0..|bx|bx|
+ *  | | | | | |     |  |
+ *  | | | | | |     |  FG (0..7) (highest bit is the toggle)
+ *  | | | | | |     BG (0..7)    (highest bit is the toggle)
+ *  | | | | | reverse
+ *  | | | | blink
+ *  | | | underscore
+ *  | | italic
+ *  | half-bright
+ *  bold */
+#define SCTUI_FG(ATTR) ((ATTR) & 0x00000008)
+#define SCTUI_BG(ATTR) ((ATTR) & 0x00000080)
+#define SCTUI_SET_FG(FG) (0x00000008 | (FG))
+#define SCTUI_SET_BG(BG) (0x00000080 | ((BG) << 4))
 
-struct sctui {
-	struct termios cur, orig;
-	int cursor_x, cursor_y, w, h;
+#define SCTUI_REVERSE     0x04000000
+#define SCTUI_BLINK       0x08000000
+#define SCTUI_UNDERSCORE  0x10000000
+#define SCTUI_ITALIC      0x20000000
+#define SCTUI_HALF_BRIGHT 0x40000000
+#define SCTUI_BOLD        0x80000000
 
-	char *buf;
-	size_t buf_size, buf_used;
+enum {
+	SCTUI_BLACK,
+	SCTUI_RED,
+	SCTUI_GREEN,
+	SCTUI_BROWN,
+	SCTUI_BLUE,
+	SCTUI_MAGENTA,
+	SCTUI_CYAN,
+	SCTUI_WHITE
 };
 
-/* It immediately write the control sequence to terminal. */
-extern void sctui_clear(void);
+struct sctui {
+	int init;
 
-/* Commit draw buffer to terminal by write(). */
-extern void sctui_commit(struct sctui *sctui);
+	struct termios cur, orig;
+	int cx, cy, w, h;
 
-/* Move cursor to a position. */
-extern void sctui_cursor(struct sctui *sctui, int x, int y);
+	char buf[SCTUI_OUT_BUF_SIZ];
+	int bufp;
 
-/* Reset terminal to origin. */
+	char cbuf[128];
+};
+
+/* It use the 'global_sctui.cbuf', so it unsupports recursive use */
+extern const char *sctui_attr_off(void);
+
+/* It use the 'global_sctui.cbuf', so it unsupports recursive use */
+extern const char *sctui_attr_on(int attr);
+
+extern void sctui_commit(void);
+extern void sctui_fill_space(char *str, int len, int w);
 extern void sctui_fini(void);
+extern int  sctui_grab_key(void);
+extern void sctui_init(void);
+extern void sctui_move(int x, int y);
+extern void sctui_out(const char *str, int len);
+extern void sctui_text(int x, int y, const char *str, int len);
+extern void sctui_update(void);
 
-/* Get terminal window size to 'sctui->{w,h}' */
-extern void sctui_get_win(struct sctui *sctui);
+extern void sctui_close_alt_screen(void);
+extern void sctui_open_alt_screen(void);
 
-/* Get input to keybuf */
-extern void sctui_grab_key(int keybuf[SCTUI_KEYBUF_SIZ]);
-
-extern void sctui_hide_cursor(struct sctui *sctui);
-
-/* You must init sctui by this before calling
- * any function needed 'sctui'. */
-extern void sctui_init(struct sctui *sctui);
-
-/**
- * Handle '\n' to space(' ') and fill white to space.
- * @param buf: char[`w` or more]
- */
-extern void sctui_prepare_text(char *buf,
-		int offset, int w,
-		const char *text);
-
-extern void sctui_show_cursor(struct sctui *sctui);
-
-/**
- * Write some text to draw buffer (sctui->buf).
- */
-extern void sctui_text(struct sctui *sctui,
-		int x, int y,
-		const char *text);
+extern struct sctui global_sctui;
 
 #endif
 
@@ -107,7 +123,12 @@ extern void sctui_text(struct sctui *sctui,
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-#define ESC_CLEAR_SCREEN     "\x1b[2J"
+#define ESC_CLEAR_SCREEN "\x1b[2J"
+#define ESC_SGR_RESET "0"
+#define ESC_SGR_BEG   "\x1b["
+#define ESC_SGR_END   "m"
+#define ESC_MOVE(R,L) "\x1b[" #R ";" #L "f"
+#define ESC_MOVEF     "\x1b[%d;%df"
 
 #define ESC_CLOSE_ALT_SCREEN "\x1b[?1049l"
 #define ESC_OPEN_ALT_SCREEN  "\x1b[?1049h"
@@ -115,16 +136,7 @@ extern void sctui_text(struct sctui *sctui,
 #define ESC_HIDE_CURSOR      "\x1b[?25l"
 #define ESC_SHOW_CURSOR      "\x1b[?25h"
 
-static void
-_sctui_buf_append(struct sctui *sctui, const char *text)
-{
-	size_t siz = strlen(text);
-	assert(siz <= BUFSIZ); //FIXME
-	if (sctui->buf_used + siz > sctui->buf_size)
-		sctui_commit(sctui);
-	stpcpy(&sctui->buf[sctui->buf_used], text);
-	sctui->buf_used += siz;
-}
+struct sctui global_sctui;
 
 static void
 _sctui_die(const char *msg, ...)
@@ -135,137 +147,152 @@ _sctui_die(const char *msg, ...)
 	vfprintf(stderr, msg, ap);
 	va_end(ap);
 
+	if (global_sctui.init)
+		sctui_fini();
 	exit(1);
 }
 
-static void *
-_sctui_ecalloc(size_t nmenb, size_t size)
+const char *
+sctui_attr_off(void)
 {
-	void *p = calloc(nmenb, size);
-	if (!p)
-		_sctui_die("failed to calloc\n");
-	return p;
+	strcpy(global_sctui.cbuf, ESC_SGR_BEG
+			ESC_SGR_RESET
+			ESC_SGR_END);
+	return global_sctui.cbuf;
 }
 
-static struct sctui *global_sctui;
-
-void
-sctui_clear(void)
+const char *
+sctui_attr_on(int attr)
 {
-	write(STDOUT_FILENO, ESC_CLEAR_SCREEN, 4);
+	char *s = global_sctui.cbuf;
+	s += sprintf(s, ESC_SGR_BEG);
+
+	if (SCTUI_BOLD & attr)
+		s += sprintf(s, ";1");
+	if (SCTUI_HALF_BRIGHT & attr)
+		s += sprintf(s, ";2");
+	if (SCTUI_ITALIC & attr)
+		s += sprintf(s, ";3");
+	if (SCTUI_UNDERSCORE & attr)
+		s += sprintf(s, ";4");
+	if (SCTUI_BLINK & attr)
+		s += sprintf(s, ";5");
+	if (SCTUI_REVERSE & attr)
+		s += sprintf(s, ";7");
+
+	if (SCTUI_BG(attr))
+		s += sprintf(s, ";%d", 40 + ((attr & 0x70) >> 4));
+	if (SCTUI_FG(attr))
+		s += sprintf(s, ";%d", 30 + (attr & 0x07));
+	s += sprintf(s, ESC_SGR_END);
+	return global_sctui.cbuf;
 }
 
 void
-sctui_commit(struct sctui *sctui)
+sctui_commit(void)
 {
-	write(STDOUT_FILENO, sctui->buf, sctui->buf_used);
-	sctui->buf_used = 0;
+	write(STDOUT_FILENO, global_sctui.buf, global_sctui.bufp);
+	global_sctui.bufp = 0;
 }
 
 void
-sctui_cursor(struct sctui *sctui, int x, int y)
+sctui_fill_space(char *str, int len, int w)
 {
-	char b[32];
-	sprintf(b, "\x1b[%u;%uH", y, x);
-	_sctui_buf_append(sctui, b);
-	sctui->cursor_x = x;
-	sctui->cursor_y = y;
+	for (int i = len; i < w; i++)
+		str[i] = ' ';
 }
 
 void
 sctui_fini(void)
 {
-	assert(global_sctui);
-	write(STDOUT_FILENO, ESC_CLOSE_ALT_SCREEN, 8);
-	tcsetattr(STDIN_FILENO, TCSAFLUSH, &global_sctui->orig);
+	assert(global_sctui.init);
+	tcsetattr(STDIN_FILENO, TCSAFLUSH, &global_sctui.orig);
+	global_sctui.init = 0;
+}
+
+int
+sctui_grab_key(void)
+{
+	char buf[1];
+	read(STDIN_FILENO, buf, 1);
+	return *buf;
 }
 
 void
-sctui_get_win(struct sctui *sctui)
+sctui_init(void)
+{
+	if (global_sctui.init)
+		_sctui_die("[global_sctui]: initialized\n");
+
+	tcgetattr(STDIN_FILENO, &global_sctui.orig);
+	global_sctui.cur = global_sctui.orig;
+	global_sctui.cur.c_cflag |= CS8;
+	global_sctui.cur.c_iflag &= ~(IXON | ICRNL);
+	global_sctui.cur.c_lflag &= ~(ECHO | ICANON | ISIG);
+	global_sctui.cur.c_oflag &= ~OPOST;
+	global_sctui.cur.c_cc[VMIN] = 0;
+	global_sctui.cur.c_cc[VTIME] = 1;
+	tcsetattr(STDIN_FILENO, TCSAFLUSH, &global_sctui.cur);
+	sctui_update();
+	global_sctui.cx = global_sctui.cy = 0;
+	global_sctui.bufp = 0;
+	global_sctui.init = 1;
+}
+
+void
+sctui_move(int x, int y)
+{
+	char b[32];
+	sctui_out(b, sprintf(b, ESC_MOVEF, y + 1, x + 1));
+	global_sctui.cx = x;
+	global_sctui.cy = y;
+}
+
+void
+sctui_out(const char *str, int len)
+{
+	if (len == 0)
+		len = strlen(str);
+	if (len > (int)sizeof(global_sctui.buf) - global_sctui.bufp)
+		sctui_commit();
+	memcpy(global_sctui.buf + global_sctui.bufp, str, len);
+	global_sctui.bufp += len;
+}
+
+void
+sctui_text(int x, int y, const char *str, int len)
+{
+	int ox = global_sctui.cx, oy = global_sctui.cy;
+	sctui_move(x, y);
+	sctui_out(str, len);
+	sctui_move(ox, oy);
+}
+
+void
+sctui_update(void)
 {
 	struct winsize ws;
 	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
 		sctui_fini();
-		_sctui_die("[sctui]: failed to get winsize\n");
+		_sctui_die("[global_sctui]: failed to get winsize\n");
 	}
-	sctui->w = ws.ws_col ? ws.ws_col : 80;
-	sctui->h = ws.ws_row ? ws.ws_row : 24;
+	global_sctui.w = ws.ws_col ? ws.ws_col : 80;
+	global_sctui.h = ws.ws_row ? ws.ws_row : 24;
 }
 
 void
-sctui_grab_key(int keybuf[SCTUI_KEYBUF_SIZ])
+sctui_close_alt_screen(void)
 {
-	read(STDIN_FILENO, keybuf, 1);
+	sctui_out(ESC_CLOSE_ALT_SCREEN, 0);
 }
 
 void
-sctui_hide_cursor(struct sctui *sctui)
+sctui_open_alt_screen(void)
 {
-	_sctui_buf_append(sctui, ESC_HIDE_CURSOR);
+	sctui_out(ESC_OPEN_ALT_SCREEN
+			ESC_CLEAR_SCREEN
+			ESC_MOVE(1,1),
+			0);
 }
 
-void
-sctui_init(struct sctui *sctui)
-{
-	if (global_sctui)
-		_sctui_die("[sctui]: initialized\n");
-
-	tcgetattr(STDIN_FILENO, &sctui->orig);
-	global_sctui = sctui;
-	sctui->cur = sctui->orig;
-	sctui->cur.c_cflag |= CS8;
-	sctui->cur.c_iflag &= ~(IXON | ICRNL);
-	sctui->cur.c_lflag &= ~(ECHO | ICANON | ISIG);
-	sctui->cur.c_oflag &= ~OPOST;
-	sctui->cur.c_cc[VMIN] = 0;
-	sctui->cur.c_cc[VTIME] = 1;
-	tcsetattr(STDIN_FILENO, TCSAFLUSH, &sctui->cur);
-	write(STDOUT_FILENO, ESC_OPEN_ALT_SCREEN, 8);
-	sctui_get_win(sctui);
-	sctui->cursor_x = sctui->cursor_y = 1;
-	sctui->buf = _sctui_ecalloc(BUFSIZ, sizeof(char));
-	sctui->buf_size = BUFSIZ;
-	sctui->buf_used = 0;
-	write(STDOUT_FILENO, ESC_CLEAR_SCREEN, strlen(ESC_CLEAR_SCREEN));
-	write(STDOUT_FILENO, "\x1b[1;1H", 6);
-}
-
-void
-sctui_prepare_text(char *buf,
-		int offset, int w,
-		const char *text)
-{
-	int tlen = strlen(text), len;
-	int i;
-	len = w - offset;
-	if (len > tlen)
-		len = tlen;
-	strncpy(&buf[offset], text, len);
-	for (i = 0; i < offset; i++)
-		buf[i] = ' ';
-	for (i = offset; i < w; i++) {
-		if (i < offset + len && buf[i] != '\n')
-			continue;
-		buf[i] = ' ';
-	}
-	buf[i] = '\0';
-}
-
-void
-sctui_show_cursor(struct sctui *sctui)
-{
-	_sctui_buf_append(sctui, ESC_SHOW_CURSOR);
-}
-
-void
-sctui_text(struct sctui *sctui,
-		int x, int y,
-		const char *text)
-{
-	int ox = sctui->cursor_x, oy = sctui->cursor_y;
-
-	sctui_cursor(sctui, x, y);
-	_sctui_buf_append(sctui, text);
-	sctui_cursor(sctui, ox, oy);
-}
 #endif /* SCTUI_IMPL */
