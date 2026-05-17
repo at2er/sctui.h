@@ -95,6 +95,7 @@ extern const char *sctui_attr_off(void);
 /* It use the 'global_sctui.cbuf', so it unsupports recursive use */
 extern const char *sctui_attr_on(int attr);
 
+extern void sctui_clear(void);
 extern void sctui_commit(void);
 extern void sctui_fill_space(char *str, int len, int w);
 extern void sctui_fini(void);
@@ -189,6 +190,12 @@ sctui_attr_on(int attr)
 }
 
 void
+sctui_clear(void)
+{
+	sctui_out(ESC_CLEAR_SCREEN, 0);
+}
+
+void
 sctui_commit(void)
 {
 	write(STDOUT_FILENO, global_sctui.buf, global_sctui.bufp);
@@ -215,6 +222,8 @@ sctui_grab_key(void)
 {
 	char buf[1];
 	read(STDIN_FILENO, buf, 1);
+	if (*buf == 13)
+		return 10;
 	return *buf;
 }
 
