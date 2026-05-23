@@ -4,8 +4,6 @@
  *
  * Put 'SKB_IMPL' to one source file to compile it and use it.
  *
- * @important: `get_keys_table` must be declared before include this file.
- * `const struct key *get_keys_table(void)`
  *
  * Keys:
  *   - Control (ctrl):
@@ -94,7 +92,7 @@ struct key {
 	SKB_REDEFINE_KEY
 };
 
-extern bool skb_handle_key(int key);
+extern bool skb_handle_key(int key, const struct key *keys);
 
 extern int skb_combo[SKB_MAX_KEYCOMBO];
 extern int skb_ncombo;
@@ -118,7 +116,7 @@ _skb_compare_key(const char *key, int pressed)
 		return 0; \
 	}
 	SPECIAL(127, '/', 'b') else
-	SPECIAL(13,  '/', 'r') else
+	SPECIAL(10,  '/', 'r') else
 	SPECIAL(27,  '/', 'e') else
 	SPECIAL(' ', '/', 's') else
 	SPECIAL('/', '/', '/') else
@@ -156,13 +154,11 @@ _skb_apply_key(const struct key *key)
 }
 
 bool
-skb_handle_key(int key)
+skb_handle_key(int key, const struct key *keys)
 {
-	const struct key *keys;
 	enum _SKB_APPLY_KEY_RESULT ret;
 	bool usable = false;
 	skb_combo[skb_ncombo++] = key;
-	keys = get_keys_table();
 	for (int i = 0; keys[i].keys != NULL; i++) {
 		ret = _skb_apply_key(&keys[i]);
 		if (ret == _SKB_APPLY_KEY_SUCCESS)
